@@ -12,13 +12,15 @@ base_url = "https://<opsman>"
 
 access_token = ""
 
-config = {
-    "director": {},
-    "products": {},
-}
+config_dir = "./config"
 
-# Assume everything is good!
-safe_to_proceed = True
+expected_director_properties = {}
+expected_products = {}
+expected_products_properties = {}
+
+actual_director_properties = {}
+actual_products = {}
+actual_products_properties = {}
 
 # Configure logging
 logger = logging.getLogger()
@@ -29,73 +31,113 @@ formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
+# Disable requests/urllib logging
+requests.packages.urllib3.disable_warnings()
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+
 if "-v" in sys.argv:
     ch.setLevel(logging.DEBUG)
 
-print("Checking the lab configuration")
-
 # Get access token
-logger.debug("Getting access token from UAA")
+logger.info("Getting access token from UAA")
 uaac_token_output = subprocess.check_output(["bash", "get_access_token_from_uaac.sh"])
 logger.debug("Output: {}".format(uaac_token_output.decode()))
 access_token = str(uaac_token_output.decode()).strip().split("\n")[-1]
 logger.debug("Access Token: {}".format(access_token))
 
-# Get director properties
-logger.debug("Loading expected configuration from local files")
-for f in glob.glob("config/staged_director_*.json"):
-    logger.debug("- {}".format(f))
-    page = f.replace("config/staged_director_", "").replace(".json", "")
-    config["director"][page] = json.load(open(f))
+# Get expected director properties
+logger.info("Loading expected configuration from local files")
 
-# Get product properties
-staged_products = json.load(open("config/staged_products.json"))
-staged_products = staged_products[1:] # Remove p-bosh
-for staged_product in staged_products:
-    product_file = "config/staged_products_{}_properties.json".format(staged_product["type"])
-    logger.debug("- {}".format(product_file))
-    config["products"][staged_product["type"]] = {
+# for f in glob.glob("config/staged_director_*.json"):
+#     logger.debug("FILE {}".format(f))
+#     page = f.replace("config/staged_director_", "").replace(".json", "")
+#     expected_director_properties[page] = json.load(open(f))
+
+# Get expected product properties
+product_file = config_dir + "/staged_products.json"
+logger.debug("FILE {}".format(product_file))
+expected_products = json.load(open(product_file))
+expected_products = expected_products[1:] # Remove p-bosh
+for product in expected_products:
+    product_file = config_dir + "/staged_products_{}_properties.json".format(product["type"])
+    logger.debug("FILE {}".format(product_file))
+    expected_products_properties[product["type"]] = {
         "properties": json.load(open(product_file))["properties"]
     }
+    del product["installation_name"]
+    del product["guid"]
 
-logger.debug("Loading actual configuration from OpsMan API")
+# Get actual director properties
+logger.info("Loading actual configuration from OpsMan API")
+
 s = requests.Session()
 s.headers.update({"Authorization": "Bearer {}".format(access_token)})
 url = base_url + "/api/v0/staged/products"
-logger.debug("HTTP GET {}".format(url))
+logger.debug("HTTP {}".format(url))
 res = s.get(url, verify=False)
-staged_products = res.json()
-staged_products = staged_products[1:] # Remove p-bosh
-for product in staged_products:
-    logger.debug("Verifying {}".format(product["type"]))
-    if product["type"] not in config["products"]:
-        print("\n{}".format(product["guid"]))
-        print("    Unexpected tile deployed!")
+actual_products = res.json()
+actual_products = actual_products[1:] # Remove p-bosh
+for product in actual_products:
+    url = base_url + "/api/v0/staged/products/{}/properties".format(product["guid"])
+    logger.debug("HTTP {}".format(url))
+    res = s.get(url, verify=False)
+    actual_products_properties[product["type"]] = {
+        "properties": res.json()["properties"]
+    }
+    del product["installation_name"]
+    del product["guid"]
+
+logger.info("Validating")
+
+issues = {}
+
+# for expected_product in expected_products:
+#     if expected_product not in actual_products:
+#         print("Tile \"{}\" not found in OpsMan".format(expected_product["type"]))
+
+# for actual_product in actual_products:
+#     if actual_product not in expected_products:
+#         print("Tile \"{}\" should not be deployed".format(actual_product["type"]))
+
+for expected_product in expected_products_properties:
+    logger.debug(expected_product)
+    issues[expected_product] = []
+
+    if expected_product not in actual_products_properties:
+        issues[expected_product].append("Tile not added to Installation Dashboard")
+        logger.debug("expected product not found...ignoring")
         continue
 
-    url = base_url + "/api/v0/staged/products/{}/properties".format(product["guid"])
-    logger.debug("HTTP GET {}".format(url))
-    res = s.get(url, verify=False)
-    product_properties = res.json()
-
-    for prop in config["products"][product["type"]]["properties"]:
-        if prop not in product_properties["properties"]:
-            print("\n{} -> {}".format(product["guid"], prop))
-            print("    Not Found!")
+    for prop in expected_products_properties[expected_product]["properties"]:
+        logger.debug(prop)
+        if expected_products_properties[expected_product]["properties"][prop]["configurable"] == False:
+            logger.debug("not configurable...ignoring")
             continue
 
-        expected_value = config["products"][product["type"]]["properties"][prop]["value"]
-        actual_value = product_properties["properties"][prop]["value"]
+        if prop not in actual_products_properties[expected_product]["properties"]:
+            issues[expected_product].append("Field \"{}\" not found.".format(prop.replace(".properties.", "").replace(".", " -> ")))
+            continue
+
+        expected_value = expected_products_properties[expected_product]["properties"][prop]["value"]
+        actual_value = actual_products_properties[expected_product]["properties"][prop]["value"]
 
         if expected_value != actual_value:
-            print("\n{} -> {}".format(product["guid"], prop))
-            print("    Found    : \"{}\"".format(actual_value))
-            print("    Expected : \"{}\"".format(expected_value))
-            safe_to_proceed = False
+            issues[expected_product].append("Field \"{}\" does not match expected value.".format(prop.replace(".properties.", "").replace(".", " -> ")))
+            logger.info("{} | {} | actual: {} | expected: {}".format(expected_product, prop, actual_value, expected_value))
 
-if safe_to_proceed:
-    print("\nYou should be safe to proceed!\n")
-else:
-    print("\nPlease fix the configuration before proceeding!\n")
+if issues == {}:
+    print("\nLab configuration looks good :-)\n")
+    exit(0)
+
+print("\nWARNING: Lab configuration does not match the lab guide!")
+for product, product_issues in issues.items():
+    print("\nTile \"{}\"".format(product))
+    if len(product_issues) == 0:
+        print("\tConfiguration good!")
+        continue
+    for issue in product_issues:
+        print("\t* " + issue)
+
+print("\nPlease correct the configuration issues mentioned above before proceeding.\n")
 
 exit(0)
