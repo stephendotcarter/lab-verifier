@@ -122,7 +122,7 @@ for expected_product in expected_products_properties:
         actual_value = actual_products_properties[expected_product]["properties"][prop]["value"]
 
         if expected_value != actual_value:
-            issues[expected_product].append("Field \"{}\" does not match expected value.".format(prop.replace(".properties.", "").replace(".", " -> ")))
+            issues[expected_product].append("Field \"{}\" does not match the lab guide.".format(prop.replace(".properties.", "").replace(".", " -> ")))
             logger.info("{} | {} | actual: {} | expected: {}".format(expected_product, prop, actual_value, expected_value))
 
 if issues == {}:
