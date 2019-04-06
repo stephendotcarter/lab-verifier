@@ -6,12 +6,9 @@ import json
 import logging
 import requests
 import subprocess
-requests.packages.urllib3.disable_warnings()
 
 base_url = "https://<opsman>"
-
 access_token = ""
-
 config_dir = "./config"
 
 expected_director_properties = {}
